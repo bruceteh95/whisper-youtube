@@ -1,4 +1,3 @@
 streamlit
-yt-dlp
+pytubefix
 faster-whisper
-ffmpeg-python
