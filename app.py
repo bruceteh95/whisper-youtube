@@ -1,42 +1,51 @@
 import streamlit as st
 import streamlit.components.v1 as components
+import base64
 
-# 页面配置
-st.set_page_config(layout="wide", page_title="Whisper Browser-Side")
+st.set_page_config(layout="wide", page_title="Whisper MP3 Timeline")
 
-st.title("🎙️ 浏览器本地语音转录 (兼容版)")
+st.title("🎵 MP3 上传识别 (带时间轴)")
 st.markdown("""
-通过 **Transformers.js** 在您的浏览器内运行 Whisper 模型，无需上传音频到服务器。
-* **技术栈**: WebGPU/WASM + ONNX Runtime Web
-* **注意**: 首次运行需下载约 75MB 的模型权重。
+上传您的 MP3 文件，浏览器将直接在本地进行识别并生成带时间轴的文本。
+* **隐私**: 音频文件不会离开您的浏览器。
+* **性能**: 建议使用 Chrome/Edge 以获得 WebGPU 加速。
 """)
 
-# HTML/JavaScript 代码块
-# 使用 @xenova/transformers v2.17.2，这是一个经过广泛测试的稳定版本
-html_code = """
-<div id="container" style="font-family: sans-serif; color: #31333F; padding: 20px; border: 1px solid #ddd; border-radius: 10px;">
-    <div id="status" style="margin-bottom: 15px; font-weight: bold; color: #FF4B4B;">状态: 等待初始化...</div>
+# 1. Streamlit 文件上传器
+uploaded_file = st.file_uploader("选择一个 MP3 文件", type=["mp3", "wav", "m4a"])
+
+audio_base64 = ""
+if uploaded_file is not None:
+    # 将文件读入并转为 Base64，以便传递给前端 JS
+    audio_bytes = uploaded_file.read()
+    audio_base64 = base64.b64encode(audio_bytes).decode()
+    st.audio(audio_bytes, format='audio/mp3')
+    st.success("文件已准备就绪，请点击下方按钮开始识别。")
+
+# 2. 前端 HTML/JS 逻辑
+html_code = f"""
+<div id="container" style="font-family: sans-serif; color: #31333F; padding: 20px; border: 1px solid #ddd; border-radius: 10px; background: #fff;">
+    <div id="status" style="margin-bottom: 15px; font-weight: bold; color: #FF4B4B;">状态: 等待文件上传...</div>
     
     <div id="progress-container" style="display: none; width: 100%; background: #eee; border-radius: 5px; margin-bottom: 15px;">
         <div id="progress-bar" style="width: 0%; height: 10px; background: #4CAF50; border-radius: 5px; transition: width 0.3s;"></div>
+        <small id="progress-text">正在加载模型...</small>
     </div>
 
-    <button id="run-btn" style="padding: 10px 20px; background: #008CBA; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 16px;">
-        加载模型并转录测试音频
+    <button id="run-btn" {"disabled" if not audio_base64 else ""} style="padding: 10px 20px; background: #008CBA; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; opacity: {'0.5' if not audio_base64 else '1'};">
+        开始本地识别 (生成时间轴)
     </button>
 
     <div style="margin-top: 20px;">
-        <strong>转录结果:</strong>
-        <pre id="output" style="white-space: pre-wrap; background: #f9f9f9; padding: 15px; border-radius: 5px; border: 1px solid #ccc; min-height: 80px; margin-top: 10px; color: #333;">等待结果...</pre>
+        <strong>识别结果 (SRT 格式):</strong>
+        <div id="output" style="white-space: pre-wrap; background: #262730; color: #f0f2f6; padding: 15px; border-radius: 5px; min-height: 150px; margin-top: 10px; font-family: monospace; font-size: 14px; overflow-y: auto; max-height: 400px;">等待识别开始...</div>
     </div>
 </div>
 
 <script type="module">
-    // 1. 导入浏览器专用 ESM 模块
-    import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2';
+    import {{ pipeline, env }} from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2';
 
-    // 2. 环境配置：禁用 Node.js 相关检查
-    env.allowLocalModels = false; 
+    env.allowLocalModels = false;
     env.useBrowserCache = true;
 
     const runBtn = document.getElementById('run-btn');
@@ -44,55 +53,73 @@ html_code = """
     const output = document.getElementById('output');
     const progContainer = document.getElementById('progress-container');
     const progBar = document.getElementById('progress-bar');
+    const progText = document.getElementById('progress-text');
 
-    runBtn.onclick = async () => {
-        try {
+    // 格式化时间函数 [秒 -> HH:MM:SS,mmm]
+    function formatTime(s) {{
+        const ms = Math.floor((s % 1) * 1000);
+        const secs = Math.floor(s % 60);
+        const mins = Math.floor((s / 60) % 60);
+        const hrs = Math.floor(s / 3600);
+        return `${{hrs.toString().padStart(2, '0')}}:${{mins.toString().padStart(2, '0')}}:${{secs.toString().padStart(2, '0')}},${{ms.toString().padStart(3, '0')}}`;
+    }}
+
+    runBtn.onclick = async () => {{
+        const audioData = "{audio_base64}";
+        if (!audioData) return;
+
+        try {{
             runBtn.disabled = true;
-            status.innerText = "状态: 正在下载模型 (首次运行较慢)...";
+            status.innerText = "状态: 初始化模型中...";
             progContainer.style.display = 'block';
 
-            // 3. 创建转录流水线 (使用 tiny 模型以保证兼容性)
-            const transcriber = await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny', {
-                progress_callback: (data) => {
-                    if (data.status === 'progress') {
+            // 1. 加载模型
+            const transcriber = await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny', {{
+                progress_callback: (data) => {{
+                    if (data.status === 'progress') {{
                         progBar.style.width = data.progress + '%';
-                    }
-                }
-            });
+                        progText.innerText = `模型下载中: ${{Math.round(data.progress)}}%`;
+                    }}
+                }}
+            }});
 
-            status.innerText = "状态: 正在识别音频...";
+            status.innerText = "状态: 正在转换音频并识别...";
             
-            // 4. 执行转录
-            const testAudioUrl = 'https://huggingface.co/datasets/Xenova/transformers.js-docs/resolve/main/jfk.wav';
-            const result = await transcriber(testAudioUrl, {
+            // 2. 将 Base64 转为 Blob URL 以供识别
+            const audioUrl = `data:audio/mp3;base64,${{audioData}}`;
+
+            // 3. 执行识别并开启 return_timestamps
+            const result = await transcriber(audioUrl, {{
                 chunk_length_s: 30,
                 stride_length_s: 5,
-                language: 'english'
-            });
+                return_timestamps: true, // 开启时间轴输出
+                language: 'chinese'      // 默认设为中文，您也可以设为 'auto'
+            }});
 
-            // 5. 显示结果
-            output.innerText = result.text;
-            status.innerText = "状态: ✅ 转录完成！";
+            // 4. 构建带时间轴的显示字符串 (SRT 风格)
+            let timelineText = "";
+            result.chunks.forEach((chunk, index) => {{
+                const start = formatTime(chunk.timestamp[0]);
+                const end = formatTime(chunk.timestamp[1] || chunk.timestamp[0] + 2);
+                timelineText += `${{index + 1}}\\n${{start}} --> ${{end}}\\n${{chunk.text.trim()}}\\n\\n`;
+            }});
+
+            output.innerText = timelineText || result.text;
+            status.innerText = "状态: ✅ 识别完成！";
             progContainer.style.display = 'none';
 
-        } catch (err) {
-            console.error("Whisper Error:", err);
-            status.innerText = "状态: ❌ 错误 (请检查控制台)";
-            output.innerText = "错误详情:\\n" + err.message;
-        } finally {
+        }} catch (err) {{
+            console.error(err);
+            status.innerText = "状态: ❌ 错误";
+            output.innerText = "错误详情: " + err.message;
+        }} finally {{
             runBtn.disabled = false;
-        }
-    };
+        }}
+    }};
 </script>
 """
 
-# 在 Streamlit 中渲染嵌入式 HTML
-# 设置足够的高度以显示进度条和文本
-components.html(html_code, height=450, scrolling=True)
+# 3. 渲染组件
+components.html(html_code, height=700, scrolling=True)
 
-st.sidebar.header("排错指南")
-st.sidebar.info("""
-1. **F12 控制台**: 如果点击没反应，请按 F12 查看 Console 报错。
-2. **网络问题**: 如果模型下载卡住，可能是无法连接到 Hugging Face。
-3. **内存**: `whisper-base` 需要更多内存，若当前 `tiny` 运行成功，可尝试手动修改脚本中的模型名称。
-""")
+st.info("💡 提示：如果您的电脑有独立显卡，此过程会非常快。识别结果采用标准的 SRT 字幕格式显示。")
