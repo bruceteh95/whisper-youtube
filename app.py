@@ -1,72 +1,97 @@
 import streamlit as st
 import requests
 import os
+import time
 from faster_whisper import WhisperModel
 
-st.set_page_config(page_title="全自动 Whisper 转录", page_icon="🚀")
+st.set_page_config(page_title="Whisper 转录 (v10 API)", page_icon="⚡")
 
 @st.cache_resource
 def load_model():
+    # Streamlit Cloud 内存有限，强制使用 base + int8
     return WhisperModel("base", device="cpu", compute_type="int8")
 
 model = load_model()
 
-def download_audio_via_api(youtube_url):
-    """使用公共 Cobalt 实例获取音频下载地址"""
-    # 这是一个开源的媒体提取 API
-    api_url = "https://api.cobalt.tools/api/json"
+def download_audio_v10(youtube_url):
+    """使用最新的 Cobalt v10 接口"""
+    # 使用官方推荐的公共实例或备用实例
+    api_url = "https://api.cobalt.tools/" 
     
     headers = {
         "Accept": "application/json",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
     }
     
+    # v10 的新参数格式
     payload = {
         "url": youtube_url,
-        "isAudioOnly": True,
+        "videoQuality": "720",
         "audioFormat": "mp3",
-        "vQuality": "720", # 虽是音频但需传参
+        "filenameStyle": "basic",
+        "downloadMode": "audio", # 明确指定下载模式为音频
+        "youtubeVideoCodec": "h264"
     }
 
     try:
+        # 第一步：向 API 发送处理请求
         response = requests.post(api_url, json=payload, headers=headers)
-        data = response.json()
+        result = response.json()
         
-        if data.get("status") == "stream":
-            download_url = data.get("url")
-            # 真正从流地址下载文件到本地
-            audio_data = requests.get(download_url).content
-            with open("temp_audio.mp3", "wb") as f:
-                f.write(audio_data)
-            return "temp_audio.mp3", None
+        # v10 返回的状态通常是 'tunnel' (直接下载流) 或 'redirect'
+        if result.get("status") in ["tunnel", "redirect", "success"]:
+            download_url = result.get("url")
+            
+            # 第二步：从返回的 URL 下载实际文件
+            audio_response = requests.get(download_url, stream=True)
+            if audio_response.status_code == 200:
+                with open("temp_audio.mp3", "wb") as f:
+                    for chunk in audio_response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                return "temp_audio.mp3", None
+            else:
+                return None, "无法从提取链接获取文件数据"
         else:
-            return None, f"API 报错: {data.get('text', '未知错误')}"
+            return None, f"API 错误反馈: {result.get('text', '无法解析视频')}"
+            
     except Exception as e:
-        return None, f"请求失败: {str(e)}"
+        return None, f"连接 Cobalt 失败: {str(e)}"
 
-st.title("🚀 极速 YouTube 转录 (无需授权)")
+# --- UI 界面 ---
+st.title("⚡ 智能 YouTube 转录助手")
+st.caption("基于 Cobalt v10 API & Faster-Whisper")
 
-url = st.text_input("在此输入 YouTube 链接:")
+url = st.text_input("输入 YouTube URL:", placeholder="https://www.youtube.com/watch?v=...")
 
-if st.button("开始提取"):
+if st.button("开始自动转录"):
     if url:
-        with st.status("正在绕过限制提取音频...") as status:
-            file_path, err = download_audio_via_api(url)
+        with st.status("正在通过 API 提取音频...", expanded=True) as status:
+            file_path, err = download_audio_v10(url)
             
             if err:
-                st.error(err)
+                st.error(f"提取失败: {err}")
+                st.info("💡 如果接口繁忙，请稍后再试，或检查链接是否有效。")
             else:
-                status.update(label="音频获取成功！开始 AI 识别...", state="running")
+                status.update(label="音频提取成功！AI 正在识别文本...", state="running")
+                
+                # 开始 Whisper 转录
                 segments, info = model.transcribe(file_path, beam_size=5)
                 
-                final_text = ""
+                full_content = ""
                 for segment in segments:
-                    line = f"[{int(segment.start)//60:02d}:{int(segment.start)%60:02d}] {segment.text}\n"
-                    final_text += line
+                    # 格式化时间戳 [分:秒]
+                    ts = f"[{int(segment.start)//60:02d}:{int(segment.start)%60:02d}]"
+                    line = f"{ts} {segment.text}\n"
+                    full_content += line
                     st.write(line)
                 
-                st.success("转录完成！")
-                st.download_button("保存结果", final_text)
-                os.remove(file_path)
+                status.update(label="转录大功告成！", state="complete")
+                
+                st.divider()
+                st.download_button("📥 点击下载转录文本", full_content, file_name="transcript.txt")
+                
+                # 清理文件
+                if os.path.exists(file_path):
+                    os.remove(file_path)
     else:
         st.warning("请输入链接")
