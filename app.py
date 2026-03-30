@@ -1,82 +1,82 @@
 import streamlit as st
 import os
 from pytubefix import YouTube
-from pytubefix.cli import on_progress
 from faster_whisper import WhisperModel
 
-# --- 页面配置 ---
-st.set_page_config(page_title="AI 视频转录助手", page_icon="🎙️")
+st.set_page_config(page_title="OAuth Whisper 转录器", page_icon="🔑")
 
-st.title("🎙️ YouTube 视频转录工具")
-st.markdown("使用 OpenAI Whisper 模型，直接从 YouTube 链接提取文本。")
-
-# --- 1. 加载模型 (缓存以节省内存) ---
+# --- 1. 加载模型 ---
 @st.cache_resource
-def load_whisper_model():
-    # 使用 'base' 模型平衡速度与准确度
-    # compute_type="int8" 极大减少内存占用，防止 Streamlit 403/崩溃
+def load_model():
     return WhisperModel("base", device="cpu", compute_type="int8")
 
-model = load_whisper_model()
+model = load_model()
 
-# --- 2. 核心功能：下载与转录 ---
-def process_video(url):
+# --- 2. 带有 OAuth 的下载函数 ---
+def download_with_oauth(url):
     try:
-        # 下载音频
-        with st.status("正在从 YouTube 获取音频...", expanded=True) as status:
-            yt = YouTube(url, on_progress_callback=on_progress)
-            st.info(f"正在处理: **{yt.title}**")
-            
-            # 仅提取音频流以节省带宽
-            audio_stream = yt.streams.get_audio_only()
-            audio_path = audio_stream.download(filename="temp_audio.mp3")
-            status.update(label="音频下载完成！开始转录...", state="running")
-
-            # 执行转录
-            segments, info = model.transcribe(audio_path, beam_size=5)
-            
-            full_text = []
-            progress_bar = st.progress(0)
-            
-            # 迭代转录结果
-            for segment in segments:
-                timestamp = f"[{int(segment.start)//60:02d}:{int(segment.start)%60:02d}]"
-                line = f"{timestamp} {segment.text}"
-                full_text.append(line)
-                # 实时显示在界面上
-                st.write(line)
-
-            status.update(label="转录成功！", state="complete")
-            return "\n".join(full_text), audio_path
-
-    except Exception as e:
-        st.error(f"处理失败: {str(e)}")
-        return None, None
-
-# --- 3. 网页交互界面 ---
-url_input = st.text_input("请输入 YouTube 视频链接:", placeholder="https://www.youtube.com/watch?v=...")
-
-if st.button("🚀 开始任务"):
-    if url_input:
-        transcript, file_to_clean = process_video(url_input)
+        # 使用 use_oauth=True 开启授权模式
+        # allow_oauth_cache=True 会尝试寻找本地 token，避免重复授权
+        yt = YouTube(
+            url, 
+            use_oauth=True, 
+            allow_oauth_cache=True
+        )
         
-        if transcript:
-            st.divider()
-            st.subheader("最终转录文本")
-            st.text_area("您可以复制以下内容:", transcript, height=400)
-            
-            # 提供下载
-            st.download_button(
-                label="📥 下载转录结果 (.txt)",
-                data=transcript,
-                file_name="transcript.txt",
-                mime="text/plain"
-            )
-            
-            # 清理服务器临时文件
-            if os.path.exists(file_to_clean):
-                os.remove(file_to_clean)
-    else:
-        st.warning("请先输入链接！")
+        # 如果需要授权，pytubefix 会在后台等待。
+        # 注意：在 Streamlit 云端，我们需要在日志或通过捕获输出来引导用户
+        st.info(f"正在准备下载: {yt.title}")
+        
+        audio = yt.streams.get_audio_only()
+        path = audio.download(filename="temp_audio.mp3")
+        return path, None
+    except Exception as e:
+        return None, str(e)
 
-st.sidebar.info("💡 提示：对于长视频，转录可能需要几分钟，请耐心等待。")
+# --- 3. 界面逻辑 ---
+st.title("🛡️ YouTube 稳定转录器 (OAuth 版)")
+st.write("如果这是你第一次运行，请查看下方说明完成 Google 授权。")
+
+url_input = st.text_input("YouTube 链接:")
+
+if st.button("开始转录"):
+    if url_input:
+        with st.status("正在处理中...") as status:
+            # 执行下载
+            audio_path, error = download_with_oauth(url_input)
+            
+            if error:
+                st.error(f"下载失败: {error}")
+                st.info("💡 如果提示需要授权，请检查 Streamlit 的侧边栏日志或控制台输出。")
+            else:
+                status.update(label="音频下载成功！正在 AI 转录...", state="running")
+                
+                # 开始转录
+                segments, info = model.transcribe(audio_path, beam_size=5)
+                
+                result_text = ""
+                for segment in segments:
+                    line = f"[{int(segment.start)//60:02d}:{int(segment.start)%60:02d}] {segment.text}\n"
+                    result_text += line
+                    st.write(line)
+                
+                st.success("转录完成！")
+                st.download_button("下载文本", result_text, file_name="output.txt")
+                
+                # 清理
+                if os.path.exists(audio_path):
+                    os.remove(audio_path)
+    else:
+        st.warning("请输入链接")
+
+# --- 4. 关键点：如何在 Streamlit Cloud 完成授权 ---
+with st.sidebar:
+    st.header("🔑 首次运行授权指南")
+    st.markdown("""
+    1. 点击 **'开始转录'** 按钮。
+    2. 观察 Streamlit 右下角的 **'Manage App' -> 'Logs'** (日志窗口)。
+    3. 你会看到一行文字：  
+       `Please open https://www.google.com/device and input code XXXX-XXXX`
+    4. 在你的浏览器打开该链接，输入代码，选择你的 Google 账号授权。
+    5. 授权完成后，程序会自动继续运行。
+    """)
