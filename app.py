@@ -1,82 +1,72 @@
 import streamlit as st
+import requests
 import os
-from pytubefix import YouTube
 from faster_whisper import WhisperModel
 
-st.set_page_config(page_title="OAuth Whisper 转录器", page_icon="🔑")
+st.set_page_config(page_title="全自动 Whisper 转录", page_icon="🚀")
 
-# --- 1. 加载模型 ---
 @st.cache_resource
 def load_model():
     return WhisperModel("base", device="cpu", compute_type="int8")
 
 model = load_model()
 
-# --- 2. 带有 OAuth 的下载函数 ---
-def download_with_oauth(url):
+def download_audio_via_api(youtube_url):
+    """使用公共 Cobalt 实例获取音频下载地址"""
+    # 这是一个开源的媒体提取 API
+    api_url = "https://api.cobalt.tools/api/json"
+    
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "url": youtube_url,
+        "isAudioOnly": True,
+        "audioFormat": "mp3",
+        "vQuality": "720", # 虽是音频但需传参
+    }
+
     try:
-        # 使用 use_oauth=True 开启授权模式
-        # allow_oauth_cache=True 会尝试寻找本地 token，避免重复授权
-        yt = YouTube(
-            url, 
-            use_oauth=True, 
-            allow_oauth_cache=True
-        )
+        response = requests.post(api_url, json=payload, headers=headers)
+        data = response.json()
         
-        # 如果需要授权，pytubefix 会在后台等待。
-        # 注意：在 Streamlit 云端，我们需要在日志或通过捕获输出来引导用户
-        st.info(f"正在准备下载: {yt.title}")
-        
-        audio = yt.streams.get_audio_only()
-        path = audio.download(filename="temp_audio.mp3")
-        return path, None
+        if data.get("status") == "stream":
+            download_url = data.get("url")
+            # 真正从流地址下载文件到本地
+            audio_data = requests.get(download_url).content
+            with open("temp_audio.mp3", "wb") as f:
+                f.write(audio_data)
+            return "temp_audio.mp3", None
+        else:
+            return None, f"API 报错: {data.get('text', '未知错误')}"
     except Exception as e:
-        return None, str(e)
+        return None, f"请求失败: {str(e)}"
 
-# --- 3. 界面逻辑 ---
-st.title("🛡️ YouTube 稳定转录器 (OAuth 版)")
-st.write("如果这是你第一次运行，请查看下方说明完成 Google 授权。")
+st.title("🚀 极速 YouTube 转录 (无需授权)")
 
-url_input = st.text_input("YouTube 链接:")
+url = st.text_input("在此输入 YouTube 链接:")
 
-if st.button("开始转录"):
-    if url_input:
-        with st.status("正在处理中...") as status:
-            # 执行下载
-            audio_path, error = download_with_oauth(url_input)
+if st.button("开始提取"):
+    if url:
+        with st.status("正在绕过限制提取音频...") as status:
+            file_path, err = download_audio_via_api(url)
             
-            if error:
-                st.error(f"下载失败: {error}")
-                st.info("💡 如果提示需要授权，请检查 Streamlit 的侧边栏日志或控制台输出。")
+            if err:
+                st.error(err)
             else:
-                status.update(label="音频下载成功！正在 AI 转录...", state="running")
+                status.update(label="音频获取成功！开始 AI 识别...", state="running")
+                segments, info = model.transcribe(file_path, beam_size=5)
                 
-                # 开始转录
-                segments, info = model.transcribe(audio_path, beam_size=5)
-                
-                result_text = ""
+                final_text = ""
                 for segment in segments:
                     line = f"[{int(segment.start)//60:02d}:{int(segment.start)%60:02d}] {segment.text}\n"
-                    result_text += line
+                    final_text += line
                     st.write(line)
                 
                 st.success("转录完成！")
-                st.download_button("下载文本", result_text, file_name="output.txt")
-                
-                # 清理
-                if os.path.exists(audio_path):
-                    os.remove(audio_path)
+                st.download_button("保存结果", final_text)
+                os.remove(file_path)
     else:
         st.warning("请输入链接")
-
-# --- 4. 关键点：如何在 Streamlit Cloud 完成授权 ---
-with st.sidebar:
-    st.header("🔑 首次运行授权指南")
-    st.markdown("""
-    1. 点击 **'开始转录'** 按钮。
-    2. 观察 Streamlit 右下角的 **'Manage App' -> 'Logs'** (日志窗口)。
-    3. 你会看到一行文字：  
-       `Please open https://www.google.com/device and input code XXXX-XXXX`
-    4. 在你的浏览器打开该链接，输入代码，选择你的 Google 账号授权。
-    5. 授权完成后，程序会自动继续运行。
-    """)
